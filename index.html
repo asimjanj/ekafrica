@@ -1427,7 +1427,9 @@ const COFAC_DEFAULTS = [
   {name:"Co-facilitator 3", pct:0.00}, {name:"Co-facilitator 4", pct:0.00},
 ];
 
-const HISTORY_KEY = "eka_ceremony_history_v4";
+// History now lives server-side (see netlify/functions/history.js),
+// shared across every device using the app. MAX_HISTORY mirrors the
+// function's own cap, kept here only as a readable reference.
 const MAX_HISTORY = 50;
 
 /* ════════════════════════════════════════════════════════════════
@@ -1806,24 +1808,35 @@ function drawDonut(helperCost, opsCost, cofacCost, takehome){
 /* ════════════════════════════════════════════════════════════════
    VERSION HISTORY — manual save only, 50-entry cap, delete with confirm
    ════════════════════════════════════════════════════════════════ */
-function loadHistory(){
-  try{ return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); }catch(e){ return []; }
-}
-function persistHistory(hist){
-  try{ localStorage.setItem(HISTORY_KEY, JSON.stringify(hist)); }catch(e){
-    // localStorage may be full or unavailable - fail silently, save button
-    // will simply not persist this session. Nothing else depends on it.
+const HISTORY_API = "/api/history";
+
+async function loadHistory(){
+  try{
+    const res = await fetch(HISTORY_API);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.history || [];
+  }catch(e){
+    // Network issue or function unavailable - fail to an empty list rather
+    // than throwing, so the rest of the UI stays usable.
+    return [];
   }
 }
 
-function saveCurrentToHistory(){
+async function saveCurrentToHistory(){
   const s = readState();
-  let hist = loadHistory();
-  const id = 'h_' + Date.now() + '_' + Math.random().toString(36).slice(2,8);
-  hist.unshift({ id, timestamp: new Date().toISOString(), state: s });
-  hist = hist.slice(0, MAX_HISTORY);
-  persistHistory(hist);
-  renderHistoryDrawer();
+  try{
+    const res = await fetch(HISTORY_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ state: s }),
+    });
+    if (!res.ok) throw new Error("Save failed");
+  }catch(e){
+    alert("Could not save to shared history right now. Please check your connection and try again.");
+    return;
+  }
+  await renderHistoryDrawer();
   showSaveConfirmation();
 }
 
@@ -1837,16 +1850,21 @@ function showSaveConfirmation(){
   });
 }
 
-function deleteHistoryEntry(id){
-  let hist = loadHistory();
-  hist = hist.filter(h => h.id !== id);
-  persistHistory(hist);
-  renderHistoryDrawer();
+async function deleteHistoryEntry(id){
+  try{
+    const res = await fetch(`${HISTORY_API}?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!res.ok) throw new Error("Delete failed");
+  }catch(e){
+    alert("Could not delete that entry right now. Please check your connection and try again.");
+    return;
+  }
+  await renderHistoryDrawer();
 }
 
-function renderHistoryDrawer(){
+async function renderHistoryDrawer(){
   const body = document.getElementById('historyDrawerBody');
-  const hist = loadHistory();
+  body.innerHTML = '<div class="history-empty">Loading…</div>';
+  const hist = await loadHistory();
 
   if (hist.length === 0){
     body.innerHTML = '<div class="history-empty">No saved ceremonies yet.<br>Use "Save to history" on the planner to keep a copy here.</div>';
@@ -1893,9 +1911,9 @@ function escapeHtml(str){
   return div.innerHTML;
 }
 
-function confirmDeleteHistoryEntry(id, label){
+async function confirmDeleteHistoryEntry(id, label){
   const ok = window.confirm(`Delete "${label}" from history? This cannot be undone.`);
-  if (ok) deleteHistoryEntry(id);
+  if (ok) await deleteHistoryEntry(id);
 }
 
 function applyState(s){
@@ -2154,11 +2172,11 @@ function initInactivityWatcher(){
   });
 }
 
-function loadCeremonyFromUrlIfPresent(){
+async function loadCeremonyFromUrlIfPresent(){
   const params = new URLSearchParams(window.location.search);
   const id = params.get('ceremony');
   if (!id) return;
-  const hist = loadHistory();
+  const hist = await loadHistory();
   const entry = hist.find(h => h.id === id);
   if (entry){
     applyState(entry.state);
